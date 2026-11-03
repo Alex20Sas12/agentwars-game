@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Wars — turn-based strategy for humans &amp; AI agents</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--dim:#8b949e;--acc:#58a6ff}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--fg)}
+.wrap{max-width:860px;margin:0 auto;padding:16px}
+h1{font-size:24px;margin:8px 0 4px}h1 span{color:var(--acc)}
+.sub{color:var(--dim);margin:0 0 16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin:12px 0}
+label{display:block;font-size:13px;color:var(--dim);margin:4px 0}
+input{background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--fg);padding:8px;font-size:15px;width:100%}
+button{background:#238636;border:1px solid rgba(240,246,252,.1);color:#fff;border-radius:6px;padding:8px 16px;font-size:15px;cursor:pointer}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.board{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin:10px 0}
+.tile{aspect-ratio:1;border-radius:6px;border:1px solid var(--line);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;user-select:none;position:relative;min-height:56px}
+.tile .a{font-weight:700;font-size:17px}.tile .v{position:absolute;top:3px;right:6px;font-size:11px;color:var(--dim)}
+.tile.sel{outline:2px solid var(--acc)}
+.tile.p0{background:#1f3a5f}.tile.p1{background:#4a2540}.tile.p2{background:#274432}.tile.p3{background:#4a3a20}
+.tile.neutral{background:#1c2128}
+.hud{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.seat{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-size:13px}
+.seat.turn{border-color:var(--acc)}.seat.dead{opacity:.4;text-decoration:line-through}
+.log{max-height:180px;overflow:auto;font:13px/1.45 ui-monospace,monospace;color:var(--dim);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px}
+#msg{margin:8px 0;font-size:14px;color:var(--acc);min-height:22px}
+.apibox{font:12px/1.5 ui-monospace,monospace;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-all;color:var(--dim)}
+details summary{cursor:pointer;color:var(--acc)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>⚔️ Agent <span>Wars</span></h1>
+<p class="sub">A 10-minute turn-based territory game for 2–4 players — humans in the browser, AI agents over HTTP. First to 50 map points (or best score after 20 rounds) wins.</p>
+
+<div class="card" id="lobby">
+  <div class="row">
+    <div><label>Your name</label><input id="pname" value="Player" maxlength="20"></div>
+    <div style="flex:.7"><label>Match code (blank = new)</label><input id="pcode" placeholder="ABCD" maxlength="4" style="text-transform:uppercase"></div>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button onclick="uiJoin()">Join match</button>
+    <button class="ghost" onclick="uiNew()">New match</button>
+    <button class="ghost" onclick="uiBots()">Fill seats with bots</button>
+  </div>
+  <div id="msg"></div>
+</div>
+
+<div class="card" id="game" style="display:none">
+  <div class="hud" id="hud"></div>
+  <div class="board" id="board"></div>
+  <div class="row">
+    <div><label>Deploy armies</label><input id="n" type="number" value="1" min="1"></div>
+    <button onclick="uiDeploy()">Deploy</button>
+    <button class="ghost" onclick="uiEnd()">End turn</button>
+  </div>
+  <div id="msg2" class="msg" style="color:var(--acc);margin:6px 0"></div>
+  <details><summary>Match log</summary><div class="log" id="log"></div></details>
+</div>
+
+<div class="card">
+<details><summary>Play as an AI agent — HTTP/JSON API</summary>
+<div class="apibox" id="apidoc"></div>
+</details>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let G={code:null,seat:null},selFrom=null;
+function msg(t){$('msg').textContent=t;$('msg2').textContent=t||'';}
+function api(p,opts){return fetch('/api/'+p,Object.assign({headers:{'content-type':'application/json'}},opts)).then(r=>r.json())}
+async function uiNew(){
+  const r=await api('games',{method:'POST',body:JSON.stringify({name:$('pname').value||'Player',bots:0})});
+  if(r.ok){enterGame(r.matchCode)}
+}
+async function uiJoin(){
+  const code=$('pcode').value.trim().toUpperCase();
+  if(!code){msg('Enter a match code or press "New match".');return}
+  const r=await api('games/'+code+'/join',{method:'POST',body:JSON.stringify({name:$('pname').value||'Player'})});
+  if(!r.ok){msg(r.error||'join failed');return}
+  enterGame(code,r.seat);
+}
+async function uiBots(){
+  if(!G.code){msg('Join or create a match first.');return}
+  const r=await api('games/'+G.code+'/bot',{method:'POST'});
+  msg(r.botsAdded?r.botsAdded+' bot(s) added':'no empty seats');refresh();
+}
+function enterGame(code,seat){G={code,seat:seat??G.seat};$('game').style.display='';location.hash=code;refresh();setInterval(refresh,2500)}
+async function refresh(){
+  if(!G.code)return;
+  const r=await api('games/'+G.code);
+  if(!r.ok)return;
+  render(r.state);
+}
+function render(s){
+  const b=$('board');b.innerHTML='';
+  for(const t of s.map){
+    const d=document.createElement('div');
+    d.className='tile '+(t.owner<0?'neutral':'p'+t.owner)+(selFrom&&selFrom.r===t.r&&selFrom.c===t.c?' sel':'');
+    d.innerHTML='<span class="v">+'+t.value+'</span><span class="a">'+t.armies+'</span>';
+    d.title='('+t.r+','+t.c+') owner='+(t.owner<0?'none':t.owner);
+    d.onclick=()=>clickTile(t);
+    b.appendChild(d);
+  }
+  $('hud').innerHTML=s.seats.map(x=>'<div class="seat '+(x.id===s.turn?'turn ':'')+(x.alive?'':'dead')+'">'+x.name+' · '+x.score+' pts · '+x.reserves+'🪖</div>').join('')+
+    '<div class="seat">round '+s.round+'/'+s.maxRounds+'</div>';
+  $('log').innerHTML=s.log.map(l=>l.text).join('<br>');
+  if(s.winner!=null){msg('🏆 Winner: '+s.seats[s.winner].name);}
+}
+function clickTile(t){
+  if(selFrom==null){
+    if(t.armies>0){selFrom={r:t.r,c:t.c};msg('From ('+t.r+','+t.c+') — click a target tile.')}
+  } else {
+    const a=selFrom;selFrom=null;
+    const isMine=t.owner>=0; // decide attack vs fortify server-side by ownership
+    const action=(t.owner===ownerOf(a))?'fortify':'attack';
+    move({action,r:a.r,c:a.c,r2:t.r,c2:t.c,n:parseInt($('n').value)||1});
+  }
+}
+function ownerOf(a){const el=[...document.querySelectorAll('.tile')].find(e=>e.title.startsWith('(' +a.r+','+a.c+')'));return el?0:-2}
+async function move(m){
+  // humans don't hold tokens in v1: send seat — server maps browser seat moves without token when a browserToken cookie exists
+  const r=await api('games/'+G.code+'/move',{method:'POST',body:JSON.stringify({seat:G.seat,move:m})});
+  if(!r.ok)msg(r.error);
+  else{msg('');refresh()}
+}
+async function uiDeploy(){
+  if(selFrom==null){msg('Select one of your tiles first.');return}
+  const a=selFrom;selFrom=null;
+  move({action:'deploy',r:a.r,c:a.c,n:parseInt($('n').value)||1});
+}
+function uiEnd(){msg('You move by attacking/deploying — turns advance automatically after each move.')}
+window.addEventListener('load',()=>{if(location.hash.length===5){enterGame(location.hash.slice(1).toUpperCase(),null)}});
+</script>
+</body>
+</html>
